@@ -1,114 +1,273 @@
-import SwiftUI
+// SharedCameraManager.swift - Version autofocus automatique uniquement
 import AVFoundation
 import UIKit
 
-struct BackgroundCameraView: UIViewControllerRepresentable {
-    @Binding var isEnabled: Bool
-
-    class Coordinator: NSObject {
-        var session: AVCaptureSession?
-        var previewLayer: AVCaptureVideoPreviewLayer?
+class SharedCameraManager: NSObject {
+    static let shared = SharedCameraManager()
+    
+    let session = AVCaptureSession()
+    private var input: AVCaptureDeviceInput?
+    
+    public private(set) var currentDevice: AVCaptureDevice?
+    
+    private let videoOutput = AVCaptureVideoDataOutput()
+    private let queue = DispatchQueue(label: "camera.shared.queue")
+    
+    var previewLayer: AVCaptureVideoPreviewLayer?
+    private var pixelBufferHandler: ((CVPixelBuffer) -> Void)?
+    
+    private override init() {
+        super.init()
+        setupSession()
     }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
+    
+    public func getSession() -> AVCaptureSession? {
+        return session
     }
-
-    func makeUIViewController(context: Context) -> UIViewController {
-        let viewController = UIViewController()
-        viewController.view.backgroundColor = .black
-
-        // Setup session
-        let session = AVCaptureSession()
-        session.sessionPreset = .medium
-
+    
+    private func setupSession() {
+        session.beginConfiguration()
+        
+        // Preset photo pour un autofocus optimal
+        session.sessionPreset = .photo
+        
         guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
               let input = try? AVCaptureDeviceInput(device: device),
-              session.canAddInput(input)
-        else {
-            print("❌ Erreur accès caméra arrière")
-            return viewController
+              session.canAddInput(input) else {
+            print("[CameraManager] Erreur d'initialisation")
+            return
         }
-
+        
         session.addInput(input)
-
-        // Frame rate + économie
+        self.input = input
+        self.currentDevice = device
+        
+        // Configuration autofocus automatique puissant
         do {
             try device.lockForConfiguration()
-            device.automaticallyAdjustsVideoHDREnabled = false
-            if let range = device.activeFormat.videoSupportedFrameRateRanges.first {
-                let fps = min(range.maxFrameRate, 15)
-                device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: Int32(fps))
-                device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: Int32(fps))
+            
+            // Autofocus continu - le plus puissant
+            if device.isFocusModeSupported(.continuousAutoFocus) {
+                device.focusMode = .continuousAutoFocus
+                print("✅ Autofocus: continuousAutoFocus activé")
             }
+            
+            // Auto-exposition continue
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+                print("✅ Auto-exposition: continuousAutoExposure activé")
+            }
+            
+            // Balance des blancs automatique
+            if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                device.whiteBalanceMode = .continuousAutoWhiteBalance
+                print("✅ Balance des blancs: continuousAutoWhiteBalance activé")
+            }
+            
+            // Monitoring des changements de zone pour réactivité maximale
+            device.isSubjectAreaChangeMonitoringEnabled = true
+            print("✅ Subject area monitoring: activé")
+            
+            // Pas de restriction de plage pour flexibilité maximale
+            if device.isAutoFocusRangeRestrictionSupported {
+                device.autoFocusRangeRestriction = .none
+                print("✅ Focus range: aucune restriction")
+            }
+            
             device.unlockForConfiguration()
+            
         } catch {
-            print("⚠️ Erreur configuration device: \(error)")
+            print("❌ Failed to configure device: \(error)")
         }
-
-        // Setup preview layer
-        let previewLayer = AVCaptureVideoPreviewLayer(session: session)
-        previewLayer.videoGravity = .resizeAspectFill
-        previewLayer.frame = UIScreen.main.bounds
-
-        // Insert into view hierarchy
-        viewController.view.layer.addSublayer(previewLayer)
-
-        // Blur effect
-        let blurEffect = UIBlurEffect(style: .systemUltraThinMaterialDark)
-        let blurView = UIVisualEffectView(effect: blurEffect)
-        blurView.translatesAutoresizingMaskIntoConstraints = false
-        viewController.view.addSubview(blurView)
-
-        NSLayoutConstraint.activate([
-            blurView.topAnchor.constraint(equalTo: viewController.view.topAnchor),
-            blurView.bottomAnchor.constraint(equalTo: viewController.view.bottomAnchor),
-            blurView.leadingAnchor.constraint(equalTo: viewController.view.leadingAnchor),
-            blurView.trailingAnchor.constraint(equalTo: viewController.view.trailingAnchor)
-        ])
-
-        // Overlay semi-transparent
-        let overlay = UIView()
-        overlay.backgroundColor = UIColor.black.withAlphaComponent(0.35)
-        overlay.translatesAutoresizingMaskIntoConstraints = false
-        viewController.view.addSubview(overlay)
-
-        NSLayoutConstraint.activate([
-            overlay.topAnchor.constraint(equalTo: viewController.view.topAnchor),
-            overlay.bottomAnchor.constraint(equalTo: viewController.view.bottomAnchor),
-            overlay.leadingAnchor.constraint(equalTo: viewController.view.leadingAnchor),
-            overlay.trailingAnchor.constraint(equalTo: viewController.view.trailingAnchor)
-        ])
-
-        // Store in context
-        context.coordinator.session = session
-        context.coordinator.previewLayer = previewLayer
-
-        return viewController
+        
+        // Configuration video output
+        if session.canAddOutput(videoOutput) {
+            videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+            videoOutput.setSampleBufferDelegate(self, queue: queue)
+            videoOutput.alwaysDiscardsLateVideoFrames = true
+            session.addOutput(videoOutput)
+        }
+        
+        // Preview layer
+        let preview = AVCaptureVideoPreviewLayer(session: session)
+        preview.videoGravity = .resizeAspectFill
+        preview.cornerRadius = 46
+        preview.masksToBounds = true
+        self.previewLayer = preview
+        
+        session.commitConfiguration()
+        
+        // Observer pour les changements de zone (autofocus intelligent)
+        setupSubjectAreaChangeNotification()
     }
-
-    func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
-        guard let session = context.coordinator.session else { return }
-
-        if isEnabled {
-            if !session.isRunning {
-                DispatchQueue.global(qos: .background).async {
-                    session.startRunning()
+    
+    private func setupSubjectAreaChangeNotification() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(subjectAreaDidChange),
+            name: .AVCaptureDeviceSubjectAreaDidChange,
+            object: currentDevice
+        )
+    }
+    
+    @objc private func subjectAreaDidChange(notification: NSNotification) {
+        // Réinitialise l'autofocus au centre quand la zone change
+        guard let device = currentDevice else { return }
+        
+        queue.async {
+            do {
+                try device.lockForConfiguration()
+                
+                // Recentrer l'autofocus
+                if device.isFocusPointOfInterestSupported {
+                    device.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5)
                 }
-            }
-        } else {
-            if session.isRunning {
-                DispatchQueue.global(qos: .background).async {
-                    session.stopRunning()
+                
+                if device.isExposurePointOfInterestSupported {
+                    device.exposurePointOfInterest = CGPoint(x: 0.5, y: 0.5)
                 }
+                
+                // S'assurer que les modes continus sont toujours actifs
+                if device.isFocusModeSupported(.continuousAutoFocus) {
+                    device.focusMode = .continuousAutoFocus
+                }
+                
+                if device.isExposureModeSupported(.continuousAutoExposure) {
+                    device.exposureMode = .continuousAutoExposure
+                }
+                
+                device.unlockForConfiguration()
+                print("🔄 Autofocus recentré automatiquement")
+                
+            } catch {
+                print("❌ Failed to reset autofocus: \(error)")
             }
         }
-
-        // Update preview frame in case of rotation
-        if let previewLayer = context.coordinator.previewLayer {
-            DispatchQueue.main.async {
-                previewLayer.frame = uiViewController.view.bounds
+    }
+    
+    func start() {
+        if !session.isRunning {
+            queue.async {
+                self.session.startRunning()
             }
+        }
+    }
+    
+    func stop() {
+        if session.isRunning {
+            queue.async {
+                self.session.stopRunning()
+            }
+        }
+    }
+    
+    func setPixelBufferHandler(_ handler: @escaping (CVPixelBuffer) -> Void) {
+        self.pixelBufferHandler = handler
+    }
+    
+    func getPreviewLayer() -> AVCaptureVideoPreviewLayer? {
+        return previewLayer
+    }
+    
+    func switchCamera() {
+        session.beginConfiguration()
+        
+        // Supprimer l'observer de l'ancien device
+        NotificationCenter.default.removeObserver(
+            self,
+            name: .AVCaptureDeviceSubjectAreaDidChange,
+            object: currentDevice
+        )
+        
+        // Supprimer tous les inputs existants
+        for input in session.inputs {
+            session.removeInput(input)
+            print("✅ [SharedCameraManager] Input supprimé: \(input)")
+        }
+        
+        guard let current = currentDevice else {
+            print("❌ currentDevice is nil during camera switch")
+            session.commitConfiguration()
+            return
+        }
+        let newPosition: AVCaptureDevice.Position = (current.position == .back) ? .front : .back
+        
+        let previousType = self.input?.device.deviceType
+        let deviceTypes: [AVCaptureDevice.DeviceType] = [
+            previousType ?? .builtInWideAngleCamera,
+            .builtInWideAngleCamera,
+            .builtInTrueDepthCamera
+        ]
+
+        let discovery = AVCaptureDevice.DiscoverySession(deviceTypes: deviceTypes, mediaType: .video, position: newPosition)
+
+        guard let newDevice = discovery.devices.first,
+              let newInput = try? AVCaptureDeviceInput(device: newDevice),
+              session.canAddInput(newInput) else {
+            print("❌ Switch camera failed")
+            session.commitConfiguration()
+            return
+        }
+        
+        session.addInput(newInput)
+        self.input = newInput
+        self.currentDevice = newDevice
+        
+        // Configuration autofocus du nouveau device
+        do {
+            try newDevice.lockForConfiguration()
+            
+            if newDevice.isFocusModeSupported(.continuousAutoFocus) {
+                newDevice.focusMode = .continuousAutoFocus
+            }
+            
+            if newDevice.isExposureModeSupported(.continuousAutoExposure) {
+                newDevice.exposureMode = .continuousAutoExposure
+            }
+            
+            if newDevice.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                newDevice.whiteBalanceMode = .continuousAutoWhiteBalance
+            }
+            
+            newDevice.isSubjectAreaChangeMonitoringEnabled = true
+            
+            if newDevice.isAutoFocusRangeRestrictionSupported {
+                newDevice.autoFocusRangeRestriction = .none
+            }
+            
+            newDevice.unlockForConfiguration()
+            
+        } catch {
+            print("❌ Failed to configure new device: \(error)")
+        }
+        
+        // Ajouter l'observer pour le nouveau device
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(subjectAreaDidChange),
+            name: .AVCaptureDeviceSubjectAreaDidChange,
+            object: newDevice
+        )
+        
+        if let connection = previewLayer?.connection, connection.isVideoMirroringSupported {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = (newPosition == .front)
+        }
+        
+        session.commitConfiguration()
+    }
+    
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+}
+
+extension SharedCameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard CFGetTypeID(pixelBuffer) == CVPixelBufferGetTypeID() else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.pixelBufferHandler?(pixelBuffer)
         }
     }
 }

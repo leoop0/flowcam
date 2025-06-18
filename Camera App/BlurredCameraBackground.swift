@@ -1,81 +1,62 @@
-// SharedCameraManager.swift
-// Unifie le flux caméra pour le preview et le fond flouté
-
+import SwiftUI
 import AVFoundation
-import UIKit
+import CoreImage
+import CoreImage.CIFilterBuiltins
 
-class SharedCameraManager: NSObject {
-    static let shared = SharedCameraManager()
+struct BlurredCameraBackgroundView: View {
+    @State private var blurredImage: UIImage?
+    private let context = CIContext()
+    private let blurFilter = CIFilter.gaussianBlur()
 
-    private let session = AVCaptureSession()
-    private var input: AVCaptureDeviceInput?
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                if let uiImage = blurredImage {
+                    Image(uiImage: uiImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .clipped()
+                        .transition(.opacity)
+                } else {
+                    Color.black
+                }
 
-    private let videoOutput = AVCaptureVideoDataOutput()
-    private let queue = DispatchQueue(label: "camera.shared.queue")
-
-    var previewLayer: AVCaptureVideoPreviewLayer?
-    private var pixelBufferHandler: ((CVPixelBuffer) -> Void)?
-
-    private override init() {
-        super.init()
-        setupSession()
-    }
-
-    private func setupSession() {
-        session.beginConfiguration()
-        session.sessionPreset = .medium
-
-        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-              let input = try? AVCaptureDeviceInput(device: device),
-              session.canAddInput(input) else {
-            print("[CameraManager] Erreur d'initialisation")
-            return
-        }
-
-        session.addInput(input)
-        self.input = input
-
-        if session.canAddOutput(videoOutput) {
-            videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
-            videoOutput.setSampleBufferDelegate(self, queue: queue)
-            session.addOutput(videoOutput)
-        }
-
-        let preview = AVCaptureVideoPreviewLayer(session: session)
-        preview.videoGravity = .resizeAspectFill
-        self.previewLayer = preview
-
-        session.commitConfiguration()
-    }
-
-    func start() {
-        if !session.isRunning {
-            queue.async {
-                self.session.startRunning()
+                // Optionnel : un overlay foncé par-dessus
+                Color.black.opacity(0.4)
             }
-        }
-    }
+            .onAppear {
+                
+                
+                SharedCameraManager.shared.setPixelBufferHandler { buffer in
+                    let isFront = SharedCameraManager.shared.currentDevice?.position == .front
+                    let ciImage = CIImage(cvPixelBuffer: buffer)
+                        .oriented(forExifOrientation: isFront ? 5 : 6)
+                    
 
-    func stop() {
-        if session.isRunning {
-            queue.async {
-                self.session.stopRunning()
+                    blurFilter.inputImage = ciImage
+                    blurFilter.radius = 26
+
+                    guard let outputImage = blurFilter.outputImage,
+                          let cgImage = context.createCGImage(outputImage, from: ciImage.extent)
+                    else { return }
+
+                    let uiImage = UIImage(cgImage: cgImage)
+                    DispatchQueue.main.async {
+                        self.blurredImage = uiImage
+                    }
+                }
+
+                SharedCameraManager.shared.start()
+                
+                
             }
-        }
-    }
-
-    func setPixelBufferHandler(_ handler: @escaping (CVPixelBuffer) -> Void) {
-        self.pixelBufferHandler = handler
-    }
-
-    func getPreviewLayer() -> AVCaptureVideoPreviewLayer? {
-        return previewLayer
-    }
-}
-
-extension SharedCameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
-    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        pixelBufferHandler?(pixelBuffer)
+            .onDisappear {
+                SharedCameraManager.shared.setPixelBufferHandler { _ in } // coupe le handler en 1er
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    SharedCameraManager.shared.stop() // arrête la session après un léger délai
+                }
+            }        }
+        .ignoresSafeArea()
     }
 }
