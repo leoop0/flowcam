@@ -9,6 +9,7 @@ import SwiftUI
 import AVFoundation
 import CoreImage
 import ImageIO
+import Photos
 
 struct LensInfo {
     let deviceType: AVCaptureDevice.DeviceType
@@ -498,14 +499,9 @@ struct CameraView: UIViewControllerRepresentable {
                 // Ensure correct image is passed to applyZerocamStyle
                 let processedImage = self.applyZerocamStyle(to: ciImage)
                 print("✅ Zerocam style applied")
-                if let jpegData = self.context.jpegRepresentation(
-                    of: processedImage,
-                    colorSpace: CGColorSpaceCreateDeviceRGB(),
-                    options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.95]
-                ) {
-                    DispatchQueue.main.async {
-                        UIImageWriteToSavedPhotosAlbum(UIImage(data: jpegData)!, nil, nil, nil)
-                    }
+                DispatchQueue.main.async {
+                    let uiImage = UIImage(ciImage: processedImage)
+                    self.saveCompressedImage(uiImage)
                 }
             }
         }
@@ -547,6 +543,29 @@ struct CameraView: UIViewControllerRepresentable {
                     print("⚠️ Session arrêtée, redémarrage...")
                     session.startRunning()
                 }
+            }
+        }
+
+        private func saveCompressedImage(_ image: UIImage) {
+            guard let compressedData = image.jpegData(compressionQuality: 0.4) else { return }
+            print("💾 Compressed size: \(compressedData.count / 1024) KB")
+            
+            let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent("compressed_photo.jpg")
+            do {
+                try compressedData.write(to: fileURL)
+                print("✅ Compressed JPEG saved to:", fileURL)
+
+                PHPhotoLibrary.shared().performChanges({
+                    PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: fileURL)
+                }, completionHandler: { success, error in
+                    if success {
+                        print("✅ Photo enregistrée dans la galerie")
+                    } else if let error = error {
+                        print("❌ Erreur ajout galerie:", error.localizedDescription)
+                    }
+                })
+            } catch {
+                print("❌ Erreur lors de la sauvegarde:", error)
             }
         }
     }
@@ -631,3 +650,4 @@ struct CameraView: UIViewControllerRepresentable {
         }
     }
 }
+
